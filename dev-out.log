@@ -1,0 +1,14 @@
+
+> odesa-flow-crm@1.0.0 dev
+> next dev --hostname 0.0.0.0
+
+   ▲ Next.js 15.5.14
+   - Local:        http://localhost:3004
+   - Network:      http://0.0.0.0:3004
+
+ ✓ Starting...
+ ✓ Ready in 8.6s
+ ○ Compiling / ...
+ ✓ Compiled / in 17.2s (702 modules)
+ GET / 200 in 19421ms
+ GET / 200 in 122ms

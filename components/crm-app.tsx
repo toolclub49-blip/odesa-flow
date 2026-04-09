@@ -1,6 +1,7 @@
 "use client";
 
 import { ChangeEvent, useMemo, useRef, useState } from "react";
+import { useAuth } from "@/hooks/use-auth";
 import { useCRMData } from "@/hooks/use-crm-data";
 import { t } from "@/lib/i18n";
 import { normalizePhone, normalizeSum, parseOrders } from "@/lib/parser";
@@ -125,7 +126,8 @@ function openPrintLabel(order: OrderRecord, lang: Lang) {
 }
 
 export function CRMApp() {
-  const { orders, clients, ready, cloudEnabled, addOrders, saveOrder, removeOrder, saveClient, removeClient, importSnapshot } = useCRMData();
+  const { user, ready: authReady, error: authError, authEnabled, signIn, signUp, logout } = useAuth();
+  const { orders, clients, ready, syncError, cloudEnabled, useLocalMode, addOrders, saveOrder, removeOrder, saveClient, removeClient, importSnapshot } = useCRMData(user?.uid ?? null);
   const [lang, setLang] = useState<Lang>("ru");
   const [view, setView] = useState<ViewMode>("add");
   const [rawInput, setRawInput] = useState("");
@@ -135,11 +137,16 @@ export function CRMApp() {
   const [baseSearch, setBaseSearch] = useState("");
   const [toast, setToast] = useState<ToastState>(null);
   const [courierExpanded, setCourierExpanded] = useState(false);
+  const [authMode, setAuthMode] = useState<"signin" | "signup">("signin");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [authPending, setAuthPending] = useState(false);
   const toastTimerRef = useRef<number | null>(null);
   const fileRef = useRef<HTMLInputElement | null>(null);
 
   const activeCount = useMemo(() => orders.filter((item) => !item.done).length, [orders]);
   const courierText = useMemo(() => orders.filter((item) => !item.done).map((item, index) => `${index + 1}. ${buildCourierText(item)}`).join("\n\n"), [orders]);
+  const authRequired = authEnabled && cloudEnabled && !user;
   const filteredClients = useMemo(() => {
     const query = baseSearch.trim().toLowerCase();
     return clients
@@ -151,6 +158,27 @@ export function CRMApp() {
     setToast({ message, type, title });
     if (toastTimerRef.current) window.clearTimeout(toastTimerRef.current);
     toastTimerRef.current = window.setTimeout(() => setToast(null), 2600);
+  }
+
+  async function handleAuthSubmit() {
+    if (!email.trim() || !password.trim()) {
+      notify(t(lang, "authEmptyText"), "error", t(lang, "authErrorTitle"));
+      return;
+    }
+    try {
+      setAuthPending(true);
+      if (authMode === "signup") {
+        await signUp(email.trim(), password);
+        notify(t(lang, "authSuccessSignup"), "success", t(lang, "authReady"));
+      } else {
+        await signIn(email.trim(), password);
+        notify(t(lang, "authSuccessLogin"), "success", t(lang, "authReady"));
+      }
+    } catch (error) {
+      notify(error instanceof Error ? error.message : t(lang, "authErrorTitle"), "error", t(lang, "authErrorTitle"));
+    } finally {
+      setAuthPending(false);
+    }
   }
 
   function updateDraft(index: number, patch: Partial<ParsedOrderDraft>) {
@@ -269,177 +297,216 @@ export function CRMApp() {
                 <button className={cn("lang-btn", lang === "ru" && "active")} onClick={() => setLang("ru")} type="button">RU</button>
                 <button className={cn("lang-btn", lang === "uk" && "active")} onClick={() => setLang("uk")} type="button">UA</button>
               </div>
-              <div className="hero-pill">{cloudEnabled ? t(lang, "syncCloud") : t(lang, "syncLocal")}</div>
+              <div className="hero-pill">{!useLocalMode ? t(lang, "syncCloud") : t(lang, "syncLocal")}</div>
+              {user ? (
+                <button className="account-pill" onClick={() => void logout()} type="button">
+                  <span>{user.email || t(lang, "accountLabel")}</span>
+                  <span>{t(lang, "logout")}</span>
+                </button>
+              ) : null}
             </div>
           </div>
-          <div className="hero-sub" style={{ marginTop: 10 }}>{cloudEnabled ? t(lang, "syncReady") : t(lang, "syncFallback")}</div>
+          <div className="hero-sub" style={{ marginTop: 10 }}>
+            {!cloudEnabled
+              ? t(lang, "syncFallback")
+              : authRequired
+                ? t(lang, "authNeedLogin")
+                : syncError
+                  ? `${t(lang, "syncErrorTitle")}: ${t(lang, "syncErrorText")}`
+                  : t(lang, "syncReady")}
+          </div>
         </section>
 
-        <div className="tabs">
-          <button className={cn("tab", view === "add" && "active")} onClick={() => setView("add")} type="button">{t(lang, "tabAdd")}</button>
-          <button className={cn("tab", view === "list" && "active")} onClick={() => setView("list")} type="button">{t(lang, "tabOrders")} ({activeCount})</button>
-          <button className={cn("tab", view === "base" && "active")} onClick={() => setView("base")} type="button">{t(lang, "tabBase")} ({clients.length})</button>
-        </div>
-
-        {view === "add" ? (
-          <>
-            <div className="card">
-              <div className="headline">{t(lang, "addHeadline")}</div>
-              <div className="subline">{t(lang, "addSubline")}</div>
-              <span className="lbl">{t(lang, "pasteText")}</span>
-              <textarea className="field" rows={8} value={rawInput} onChange={(event) => setRawInput(event.target.value)} />
-              <button className="btn-main" onClick={handleParse} type="button">{t(lang, "recognize")}</button>
-            </div>
-            {drafts.map((draft, index) => (
-              <div key={draft.id} className="card" style={{ borderLeft: `4px solid ${draft.isOld ? "#34c759" : "#007aff"}` }}>
-                <span className="badge" style={{ background: draft.isOld ? "#34c759" : "#007aff" }}>{draft.isOld ? t(lang, "inBase") : t(lang, "newClient")}</span>
-                <span className="lbl">{t(lang, "fullName")}</span>
-                <input className="field" value={draft.name} onChange={(event) => updateDraft(index, { name: event.target.value })} />
-                <span className="lbl">{t(lang, "address")}</span>
-                <input className="field" value={draft.addr} onChange={(event) => updateDraft(index, { addr: event.target.value })} />
-                <div className="row">
-                  <div style={{ flex: 2 }}>
-                    <span className="lbl">{t(lang, "phone")}</span>
-                    <input className="field" value={draft.phone} onChange={(event) => updateDraft(index, { phone: event.target.value })} />
-                  </div>
-                  <div style={{ flex: 1 }}>
-                    <span className="lbl">{t(lang, "sum")}</span>
-                    <input className="field" value={draft.sum} onChange={(event) => updateDraft(index, { sum: event.target.value })} />
-                  </div>
-                </div>
-                <span className="lbl">{t(lang, "note")}</span>
-                <input className="field" value={draft.note} onChange={(event) => updateDraft(index, { note: event.target.value })} />
-                <div style={{ marginTop: 10 }}>
-                  <button className={cn("tag-pay", draft.pay === "КАРТА" ? "pay-card" : "pay-cash")} onClick={() => updateDraft(index, { pay: draft.pay === "КАРТА" ? "НАЛИЧНЫЕ" : "КАРТА" })} type="button">
-                    {draft.pay === "КАРТА" ? `💳 ${t(lang, "card")}` : `💵 ${t(lang, "cash")}`}
-                  </button>
-                </div>
-              </div>
-            ))}
-            {drafts.length > 0 ? <button className="btn-main btn-save" onClick={handleSaveAll} type="button">{t(lang, "saveAll")}</button> : null}
-          </>
-        ) : null}
-
-        {view === "list" ? (
-          <>
-            <div className="toolbar">
-              <button className="btn-sm" onClick={() => void handleCopy(courierText, t(lang, "copiedCourier"))} type="button">{t(lang, "copyList")}</button>
-            </div>
-            <div className="card">
-              <button className="summary-row" onClick={() => setCourierExpanded((value) => !value)} type="button">
-                <span>{t(lang, "courierList")}</span>
-                <span className="summary-arrow">{courierExpanded ? t(lang, "collapse") : t(lang, "expand")}</span>
+        {authRequired ? (
+          <div className="card auth-card">
+            <div className="headline">{t(lang, "authTitle")}</div>
+            <div className="subline">{t(lang, "authSub")}</div>
+            <div className="auth-toggle">
+              <button className={cn("tab", authMode === "signin" && "active")} onClick={() => setAuthMode("signin")} type="button">
+                {t(lang, "authToggleSignIn")}
               </button>
-              {courierExpanded ? <div className="courier-box" style={{ marginTop: 12 }}>{courierText || t(lang, "emptyCourier")}</div> : null}
+              <button className={cn("tab", authMode === "signup" && "active")} onClick={() => setAuthMode("signup")} type="button">
+                {t(lang, "authToggleSignUp")}
+              </button>
             </div>
-            {orders.map((order) => {
-              const editing = editingOrderId === order.id;
-              return (
-                <div key={order.id} className="card" style={{ opacity: order.done ? 0.55 : 1 }}>
-                  <div className="order-meta">
-                    <div className="order-title">{order.name}</div>
-                    <button className={cn("tag-pay", order.pay === "КАРТА" ? "pay-card" : "pay-cash")} onClick={() => updateOrder(order.id, { pay: order.pay === "КАРТА" ? "НАЛИЧНЫЕ" : "КАРТА" })} type="button">
-                      {order.pay === "КАРТА" ? t(lang, "card") : t(lang, "cash")}
-                    </button>
-                  </div>
-                  {editing ? (
-                    <>
-                      <span className="lbl">{t(lang, "fullName")}</span>
-                      <input className="field" value={order.name} onChange={(event) => updateOrder(order.id, { name: event.target.value })} />
-                      <span className="lbl">{t(lang, "phone")}</span>
-                      <input className="field" value={order.phone} onChange={(event) => updateOrder(order.id, { phone: event.target.value })} />
-                      <span className="lbl">{t(lang, "address")}</span>
-                      <input className="field" value={order.addr} onChange={(event) => updateOrder(order.id, { addr: event.target.value })} />
-                      <div className="row">
-                        <div style={{ flex: 1 }}>
-                          <span className="lbl">{t(lang, "sum")}</span>
-                          <input className="field" value={order.sum} onChange={(event) => updateOrder(order.id, { sum: event.target.value })} />
-                        </div>
-                        <div style={{ flex: 1 }}>
-                          <span className="lbl">{t(lang, "payment")}</span>
-                          <button className={cn("tag-pay", order.pay === "КАРТА" ? "pay-card" : "pay-cash")} onClick={() => updateOrder(order.id, { pay: order.pay === "КАРТА" ? "НАЛИЧНЫЕ" : "КАРТА" })} type="button">
-                            {order.pay === "КАРТА" ? `💳 ${t(lang, "card")}` : `💵 ${t(lang, "cash")}`}
-                          </button>
-                        </div>
-                      </div>
-                      <span className="lbl">{t(lang, "note")}</span>
-                      <input className="field" value={order.note} onChange={(event) => updateOrder(order.id, { note: event.target.value })} />
-                      <div className="row" style={{ marginTop: 10 }}>
-                        <button className="btn-sm btn-ok" onClick={() => setEditingOrderId(null)} type="button">{t(lang, "save")}</button>
-                        <button className="btn-sm" onClick={() => setEditingOrderId(null)} type="button">{t(lang, "cancel")}</button>
-                      </div>
-                    </>
-                  ) : (
-                    <>
-                      <div className="order-line">📍 {order.addr}</div>
-                      <div className="order-line" style={{ color: "#4c8bf5" }}>📞 {order.phone} | 💰 {order.sum}</div>
-                      {order.note ? <div className="note-box">📝 {order.note}</div> : null}
-                      <div className="actions-grid">
-                        <button className="btn-sm btn-ok" onClick={() => updateOrder(order.id, { done: !order.done })} type="button">{t(lang, "done")}</button>
-                        <button className="btn-sm" onClick={() => setEditingOrderId(order.id)} type="button">{t(lang, "edit")}</button>
-                        <button className="btn-sm" onClick={() => void handleCopy(buildCourierText(order), t(lang, "copiedOrder"))} type="button">{t(lang, "copy")}</button>
-                        <button className="btn-sm" onClick={() => {
-                          const opened = openPrintLabel(order, lang);
-                          if (!opened) notify(t(lang, "printUnavailableText"), "error", t(lang, "printUnavailableTitle"));
-                        }} type="button">{t(lang, "label")}</button>
-                        <button className="btn-sm btn-danger" onClick={() => void removeOrder(order.id)} type="button">{t(lang, "delete")}</button>
-                      </div>
-                    </>
-                  )}
-                </div>
-              );
-            })}
-          </>
-        ) : null}
-
-        {view === "base" ? (
+            <span className="lbl">{t(lang, "email")}</span>
+            <input className="field" value={email} onChange={(event) => setEmail(event.target.value)} placeholder="name@example.com" type="email" />
+            <span className="lbl">{t(lang, "password")}</span>
+            <input className="field" value={password} onChange={(event) => setPassword(event.target.value)} placeholder={t(lang, "authPasswordHint")} type="password" />
+            {authError ? <div className="auth-error">{authError}</div> : null}
+            <button className="btn-main" onClick={() => void handleAuthSubmit()} disabled={authPending || !authReady} type="button">
+              {authPending ? "..." : authMode === "signup" ? t(lang, "signUp") : t(lang, "signIn")}
+            </button>
+          </div>
+        ) : (
           <>
-            <div className="toolbar">
-              <button className="btn-sm" onClick={handleExport} type="button">{t(lang, "exportJson")}</button>
-              <button className="btn-sm" onClick={() => fileRef.current?.click()} type="button">{t(lang, "importJson")}</button>
+            <div className="tabs">
+              <button className={cn("tab", view === "add" && "active")} onClick={() => setView("add")} type="button">{t(lang, "tabAdd")}</button>
+              <button className={cn("tab", view === "list" && "active")} onClick={() => setView("list")} type="button">{t(lang, "tabOrders")} ({activeCount})</button>
+              <button className={cn("tab", view === "base" && "active")} onClick={() => setView("base")} type="button">{t(lang, "tabBase")} ({clients.length})</button>
             </div>
-            <div className="card">
-              <div className="headline">{t(lang, "baseHeadline")}</div>
-              <div className="subline">{t(lang, "baseSubline")}</div>
-              <input className="field" value={baseSearch} onChange={(event) => setBaseSearch(event.target.value)} placeholder={t(lang, "baseSearch")} />
-            </div>
-            {filteredClients.length ? filteredClients.map((client) => {
-              const editing = editingClientId === client.id;
-              return (
-                <div key={client.id} className="card">
-                  <div className="row" style={{ justifyContent: "space-between" }}>
-                    <div className="order-title" style={{ fontSize: 16 }}>{client.name || t(lang, "noName")}</div>
-                    <div className="row" style={{ gap: 6 }}>
-                      <button className="btn-sm" onClick={() => setEditingClientId(client.id)} type="button">{t(lang, "edit")}</button>
-                      <button className="btn-sm btn-danger" onClick={() => void removeClient(client.id)} type="button">{t(lang, "delete")}</button>
+
+            {view === "add" ? (
+              <>
+                <div className="card">
+                  <div className="headline">{t(lang, "addHeadline")}</div>
+                  <div className="subline">{t(lang, "addSubline")}</div>
+                  <span className="lbl">{t(lang, "pasteText")}</span>
+                  <textarea className="field" rows={8} value={rawInput} onChange={(event) => setRawInput(event.target.value)} />
+                  <button className="btn-main" onClick={handleParse} type="button">{t(lang, "recognize")}</button>
+                </div>
+                {drafts.map((draft, index) => (
+                  <div key={draft.id} className="card" style={{ borderLeft: `4px solid ${draft.isOld ? "#34c759" : "#007aff"}` }}>
+                    <span className="badge" style={{ background: draft.isOld ? "#34c759" : "#007aff" }}>{draft.isOld ? t(lang, "inBase") : t(lang, "newClient")}</span>
+                    <span className="lbl">{t(lang, "fullName")}</span>
+                    <input className="field" value={draft.name} onChange={(event) => updateDraft(index, { name: event.target.value })} />
+                    <span className="lbl">{t(lang, "address")}</span>
+                    <input className="field" value={draft.addr} onChange={(event) => updateDraft(index, { addr: event.target.value })} />
+                    <div className="row">
+                      <div style={{ flex: 2 }}>
+                        <span className="lbl">{t(lang, "phone")}</span>
+                        <input className="field" value={draft.phone} onChange={(event) => updateDraft(index, { phone: event.target.value })} />
+                      </div>
+                      <div style={{ flex: 1 }}>
+                        <span className="lbl">{t(lang, "sum")}</span>
+                        <input className="field" value={draft.sum} onChange={(event) => updateDraft(index, { sum: event.target.value })} />
+                      </div>
+                    </div>
+                    <span className="lbl">{t(lang, "note")}</span>
+                    <input className="field" value={draft.note} onChange={(event) => updateDraft(index, { note: event.target.value })} />
+                    <div style={{ marginTop: 10 }}>
+                      <button className={cn("tag-pay", draft.pay === "КАРТА" ? "pay-card" : "pay-cash")} onClick={() => updateDraft(index, { pay: draft.pay === "КАРТА" ? "НАЛИЧНЫЕ" : "КАРТА" })} type="button">
+                        {draft.pay === "КАРТА" ? `💳 ${t(lang, "card")}` : `💵 ${t(lang, "cash")}`}
+                      </button>
                     </div>
                   </div>
-                  {editing ? (
-                    <>
-                      <span className="lbl">{t(lang, "fullName")}</span>
-                      <input className="field" value={client.name} onChange={(event) => updateClient(client.id, { name: event.target.value })} />
-                      <span className="lbl">{t(lang, "phone")}</span>
-                      <input className="field" value={client.phone} onChange={(event) => updateClient(client.id, { phone: event.target.value })} />
-                      <span className="lbl">{t(lang, "address")}</span>
-                      <input className="field" value={client.addr} onChange={(event) => updateClient(client.id, { addr: event.target.value })} />
-                      <div className="row" style={{ marginTop: 8 }}>
-                        <button className="btn-sm btn-ok" onClick={() => setEditingClientId(null)} type="button">{t(lang, "save")}</button>
-                        <button className="btn-sm" onClick={() => setEditingClientId(null)} type="button">{t(lang, "cancel")}</button>
-                      </div>
-                    </>
-                  ) : (
-                    <>
-                      <div className="order-line" style={{ marginTop: 8 }}>📞 {client.phone || t(lang, "noPhone")}</div>
-                      <div className="subline" style={{ marginBottom: 0 }}>{client.addr || t(lang, "noAddress")}</div>
-                    </>
-                  )}
-                </div>
-              );
-            }) : <div className="card empty-state">{baseSearch ? t(lang, "searchEmpty") : t(lang, "emptyBase")}</div>}
-          </>
-        ) : null}
+                ))}
+                {drafts.length > 0 ? <button className="btn-main btn-save" onClick={handleSaveAll} type="button">{t(lang, "saveAll")}</button> : null}
+              </>
+            ) : null}
 
-        {!ready ? <div className="card empty-state">Loading...</div> : null}
+            {view === "list" ? (
+              <>
+                <div className="toolbar">
+                  <button className="btn-sm" onClick={() => void handleCopy(courierText, t(lang, "copiedCourier"))} type="button">{t(lang, "copyList")}</button>
+                </div>
+                <div className="card">
+                  <button className="summary-row" onClick={() => setCourierExpanded((value) => !value)} type="button">
+                    <span>{t(lang, "courierList")}</span>
+                    <span className="summary-arrow">{courierExpanded ? t(lang, "collapse") : t(lang, "expand")}</span>
+                  </button>
+                  {courierExpanded ? <div className="courier-box" style={{ marginTop: 12 }}>{courierText || t(lang, "emptyCourier")}</div> : null}
+                </div>
+                {orders.map((order) => {
+                  const editing = editingOrderId === order.id;
+                  return (
+                    <div key={order.id} className="card" style={{ opacity: order.done ? 0.55 : 1 }}>
+                      <div className="order-meta">
+                        <div className="order-title">{order.name}</div>
+                        <button className={cn("tag-pay", order.pay === "КАРТА" ? "pay-card" : "pay-cash")} onClick={() => updateOrder(order.id, { pay: order.pay === "КАРТА" ? "НАЛИЧНЫЕ" : "КАРТА" })} type="button">
+                          {order.pay === "КАРТА" ? t(lang, "card") : t(lang, "cash")}
+                        </button>
+                      </div>
+                      {editing ? (
+                        <>
+                          <span className="lbl">{t(lang, "fullName")}</span>
+                          <input className="field" value={order.name} onChange={(event) => updateOrder(order.id, { name: event.target.value })} />
+                          <span className="lbl">{t(lang, "phone")}</span>
+                          <input className="field" value={order.phone} onChange={(event) => updateOrder(order.id, { phone: event.target.value })} />
+                          <span className="lbl">{t(lang, "address")}</span>
+                          <input className="field" value={order.addr} onChange={(event) => updateOrder(order.id, { addr: event.target.value })} />
+                          <div className="row">
+                            <div style={{ flex: 1 }}>
+                              <span className="lbl">{t(lang, "sum")}</span>
+                              <input className="field" value={order.sum} onChange={(event) => updateOrder(order.id, { sum: event.target.value })} />
+                            </div>
+                            <div style={{ flex: 1 }}>
+                              <span className="lbl">{t(lang, "payment")}</span>
+                              <button className={cn("tag-pay", order.pay === "КАРТА" ? "pay-card" : "pay-cash")} onClick={() => updateOrder(order.id, { pay: order.pay === "КАРТА" ? "НАЛИЧНЫЕ" : "КАРТА" })} type="button">
+                                {order.pay === "КАРТА" ? `💳 ${t(lang, "card")}` : `💵 ${t(lang, "cash")}`}
+                              </button>
+                            </div>
+                          </div>
+                          <span className="lbl">{t(lang, "note")}</span>
+                          <input className="field" value={order.note} onChange={(event) => updateOrder(order.id, { note: event.target.value })} />
+                          <div className="row" style={{ marginTop: 10 }}>
+                            <button className="btn-sm btn-ok" onClick={() => setEditingOrderId(null)} type="button">{t(lang, "save")}</button>
+                            <button className="btn-sm" onClick={() => setEditingOrderId(null)} type="button">{t(lang, "cancel")}</button>
+                          </div>
+                        </>
+                      ) : (
+                        <>
+                          <div className="order-line">📍 {order.addr}</div>
+                          <div className="order-line" style={{ color: "#4c8bf5" }}>📞 {order.phone} | 💰 {order.sum}</div>
+                          {order.note ? <div className="note-box">📝 {order.note}</div> : null}
+                          <div className="actions-grid">
+                            <button className="btn-sm btn-ok" onClick={() => updateOrder(order.id, { done: !order.done })} type="button">{t(lang, "done")}</button>
+                            <button className="btn-sm" onClick={() => setEditingOrderId(order.id)} type="button">{t(lang, "edit")}</button>
+                            <button className="btn-sm" onClick={() => void handleCopy(buildCourierText(order), t(lang, "copiedOrder"))} type="button">{t(lang, "copy")}</button>
+                            <button className="btn-sm" onClick={() => {
+                              const opened = openPrintLabel(order, lang);
+                              if (!opened) notify(t(lang, "printUnavailableText"), "error", t(lang, "printUnavailableTitle"));
+                            }} type="button">{t(lang, "label")}</button>
+                            <button className="btn-sm btn-danger" onClick={() => void removeOrder(order.id)} type="button">{t(lang, "delete")}</button>
+                          </div>
+                        </>
+                      )}
+                    </div>
+                  );
+                })}
+              </>
+            ) : null}
+
+            {view === "base" ? (
+              <>
+                <div className="toolbar">
+                  <button className="btn-sm" onClick={handleExport} type="button">{t(lang, "exportJson")}</button>
+                  <button className="btn-sm" onClick={() => fileRef.current?.click()} type="button">{t(lang, "importJson")}</button>
+                </div>
+                <div className="card">
+                  <div className="headline">{t(lang, "baseHeadline")}</div>
+                  <div className="subline">{t(lang, "baseSubline")}</div>
+                  <input className="field" value={baseSearch} onChange={(event) => setBaseSearch(event.target.value)} placeholder={t(lang, "baseSearch")} />
+                </div>
+                {filteredClients.length ? filteredClients.map((client) => {
+                  const editing = editingClientId === client.id;
+                  return (
+                    <div key={client.id} className="card">
+                      <div className="row" style={{ justifyContent: "space-between" }}>
+                        <div className="order-title" style={{ fontSize: 16 }}>{client.name || t(lang, "noName")}</div>
+                        <div className="row" style={{ gap: 6 }}>
+                          <button className="btn-sm" onClick={() => setEditingClientId(client.id)} type="button">{t(lang, "edit")}</button>
+                          <button className="btn-sm btn-danger" onClick={() => void removeClient(client.id)} type="button">{t(lang, "delete")}</button>
+                        </div>
+                      </div>
+                      {editing ? (
+                        <>
+                          <span className="lbl">{t(lang, "fullName")}</span>
+                          <input className="field" value={client.name} onChange={(event) => updateClient(client.id, { name: event.target.value })} />
+                          <span className="lbl">{t(lang, "phone")}</span>
+                          <input className="field" value={client.phone} onChange={(event) => updateClient(client.id, { phone: event.target.value })} />
+                          <span className="lbl">{t(lang, "address")}</span>
+                          <input className="field" value={client.addr} onChange={(event) => updateClient(client.id, { addr: event.target.value })} />
+                          <div className="row" style={{ marginTop: 8 }}>
+                            <button className="btn-sm btn-ok" onClick={() => setEditingClientId(null)} type="button">{t(lang, "save")}</button>
+                            <button className="btn-sm" onClick={() => setEditingClientId(null)} type="button">{t(lang, "cancel")}</button>
+                          </div>
+                        </>
+                      ) : (
+                        <>
+                          <div className="order-line" style={{ marginTop: 8 }}>📞 {client.phone || t(lang, "noPhone")}</div>
+                          <div className="subline" style={{ marginBottom: 0 }}>{client.addr || t(lang, "noAddress")}</div>
+                        </>
+                      )}
+                    </div>
+                  );
+                }) : <div className="card empty-state">{baseSearch ? t(lang, "searchEmpty") : t(lang, "emptyBase")}</div>}
+              </>
+            ) : null}
+          </>
+        )}
+
+        {!ready && !authRequired ? <div className="card empty-state">Loading...</div> : null}
       </div>
 
       <input ref={fileRef} type="file" accept=".json,application/json" hidden onChange={handleImport} />

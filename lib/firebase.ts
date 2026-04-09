@@ -1,5 +1,6 @@
 import { initializeApp, getApp, getApps } from "firebase/app";
-import { enableIndexedDbPersistence, getFirestore } from "firebase/firestore";
+import { browserLocalPersistence, getAuth, setPersistence, type Auth } from "firebase/auth";
+import { enableIndexedDbPersistence, getFirestore, type Firestore } from "firebase/firestore";
 
 const firebaseConfig = {
   apiKey: process.env.NEXT_PUBLIC_FIREBASE_API_KEY,
@@ -9,6 +10,11 @@ const firebaseConfig = {
   messagingSenderId: process.env.NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID,
   appId: process.env.NEXT_PUBLIC_FIREBASE_APP_ID
 };
+
+let dbInstance: Firestore | null = null;
+let authInstance: Auth | null = null;
+let persistenceEnabled = false;
+let authPersistenceEnabled = false;
 
 export function isFirebaseConfigured() {
   return Boolean(firebaseConfig.apiKey && firebaseConfig.projectId && firebaseConfig.appId);
@@ -22,9 +28,25 @@ export function getFirebaseApp() {
 export function getDb() {
   const app = getFirebaseApp();
   if (!app) return null;
-  const db = getFirestore(app);
-  if (typeof window !== "undefined") {
-    enableIndexedDbPersistence(db).catch(() => undefined);
+  if (!dbInstance) {
+    dbInstance = getFirestore(app);
   }
-  return db;
+  if (typeof window !== "undefined" && !persistenceEnabled) {
+    persistenceEnabled = true;
+    enableIndexedDbPersistence(dbInstance).catch(() => undefined);
+  }
+  return dbInstance;
+}
+
+export function getFirebaseAuth() {
+  const app = getFirebaseApp();
+  if (!app) return null;
+  if (!authInstance) {
+    authInstance = getAuth(app);
+  }
+  if (typeof window !== "undefined" && !authPersistenceEnabled) {
+    authPersistenceEnabled = true;
+    setPersistence(authInstance, browserLocalPersistence).catch(() => undefined);
+  }
+  return authInstance;
 }

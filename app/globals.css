@@ -40,6 +40,11 @@ textarea {
   font: inherit;
 }
 
+button:disabled {
+  opacity: 0.65;
+  cursor: default;
+}
+
 body {
   min-height: 100vh;
 }
@@ -99,6 +104,7 @@ body {
 }
 
 .hero-pill,
+.account-pill,
 .lang-switch {
   background: rgba(255, 255, 255, 0.7);
   border: 1px solid rgba(47, 36, 28, 0.08);
@@ -109,6 +115,17 @@ body {
   padding: 8px 12px;
   font-size: 12px;
   font-weight: 700;
+}
+
+.account-pill {
+  padding: 8px 12px;
+  font-size: 12px;
+  font-weight: 700;
+  display: inline-flex;
+  gap: 10px;
+  align-items: center;
+  cursor: pointer;
+  color: var(--ink);
 }
 
 .lang-switch {
@@ -142,6 +159,32 @@ body {
   padding: 4px;
   margin-bottom: 14px;
   border: 1px solid rgba(47, 36, 28, 0.06);
+}
+
+.auth-card {
+  margin-bottom: 14px;
+}
+
+.auth-toggle {
+  display: flex;
+  background: rgba(255, 255, 255, 0.62);
+  border-radius: 18px;
+  padding: 4px;
+  margin-bottom: 12px;
+  border: 1px solid rgba(47, 36, 28, 0.06);
+}
+
+.auth-toggle .tab {
+  min-height: 42px;
+}
+
+.auth-error {
+  margin-top: 10px;
+  padding: 10px 12px;
+  border-radius: 14px;
+  background: rgba(164, 107, 107, 0.12);
+  color: #8d4d4d;
+  font-size: 13px;
 }
 
 .tab {

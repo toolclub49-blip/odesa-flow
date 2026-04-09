@@ -9,6 +9,14 @@ import { createId } from "@/lib/utils";
 const LOCAL_ORDERS_KEY = "odessa_orders_v1";
 const LOCAL_CLIENTS_KEY = "odessa_clients_v1";
 
+function getUserCollectionPath(uid: string, entity: "orders" | "clients") {
+  return ["users", uid, entity] as const;
+}
+
+function getMigrationFlagKey(uid: string) {
+  return `odessa_legacy_migrated_${uid}`;
+}
+
 function readLocal(): AppSnapshot {
   if (typeof window === "undefined") return { orders: [], clients: [] };
   return {
@@ -23,13 +31,65 @@ function writeLocal(snapshot: AppSnapshot) {
   localStorage.setItem(LOCAL_CLIENTS_KEY, JSON.stringify(snapshot.clients));
 }
 
-export function useCRMData() {
+async function migrateLegacySnapshot(uid: string) {
+  const db = getDb();
+  if (!db || typeof window === "undefined") return;
+
+  try {
+    const migrationFlag = getMigrationFlagKey(uid);
+    if (localStorage.getItem(migrationFlag) === "done") return;
+
+    const userOrdersRef = collection(db, ...getUserCollectionPath(uid, "orders"));
+    const userClientsRef = collection(db, ...getUserCollectionPath(uid, "clients"));
+    const [userOrders, userClients] = await Promise.all([getDocs(userOrdersRef), getDocs(userClientsRef)]);
+
+    if (!userOrders.empty || !userClients.empty) {
+      localStorage.setItem(migrationFlag, "done");
+      return;
+    }
+
+    const [legacyOrders, legacyClients] = await Promise.all([getDocs(collection(db, "orders")), getDocs(collection(db, "clients"))]);
+    if (legacyOrders.empty && legacyClients.empty) {
+      localStorage.setItem(migrationFlag, "done");
+      return;
+    }
+
+    const batch = writeBatch(db);
+    legacyOrders.docs.forEach((entry) => {
+      batch.set(doc(db, ...getUserCollectionPath(uid, "orders"), entry.id), {
+        ...(entry.data() as Omit<OrderRecord, "id">),
+        id: entry.id
+      });
+    });
+    legacyClients.docs.forEach((entry) => {
+      batch.set(doc(db, ...getUserCollectionPath(uid, "clients"), entry.id), {
+        ...(entry.data() as Omit<ClientRecord, "id">),
+        id: entry.id
+      });
+    });
+    await batch.commit();
+    localStorage.setItem(migrationFlag, "done");
+  } catch {
+    return;
+  }
+}
+
+export function useCRMData(uid: string | null) {
   const [orders, setOrders] = useState<OrderRecord[]>([]);
   const [clients, setClients] = useState<ClientRecord[]>([]);
   const [ready, setReady] = useState(false);
+  const [syncError, setSyncError] = useState<string | null>(null);
   const cloudEnabled = useMemo(() => isFirebaseConfigured(), []);
+  const useLocalMode = !cloudEnabled || syncError !== null;
 
   useEffect(() => {
+    if (cloudEnabled && !uid) {
+      setOrders([]);
+      setClients([]);
+      setReady(true);
+      return;
+    }
+
     if (!cloudEnabled) {
       const snapshot = readLocal();
       setOrders(snapshot.orders);
@@ -47,33 +107,64 @@ export function useCRMData() {
       return;
     }
 
-    const ordersQuery = query(collection(db, "orders"), orderBy("createdAt", "desc"));
-    const clientsQuery = query(collection(db, "clients"), orderBy("name", "asc"));
+    setReady(false);
+    void migrateLegacySnapshot(uid!);
 
-    const unsubOrders = onSnapshot(ordersQuery, (snapshot) => {
-      setOrders(snapshot.docs.map((item) => ({ id: item.id, ...(item.data() as Omit<OrderRecord, "id">) })));
-      setReady(true);
-    });
+    const ordersQuery = query(collection(db, ...getUserCollectionPath(uid!, "orders")), orderBy("createdAt", "desc"));
+    const clientsQuery = query(collection(db, ...getUserCollectionPath(uid!, "clients")), orderBy("name", "asc"));
+    let orderReady = false;
+    let clientReady = false;
 
-    const unsubClients = onSnapshot(clientsQuery, (snapshot) => {
-      setClients(snapshot.docs.map((item) => ({ id: item.id, ...(item.data() as Omit<ClientRecord, "id">) })));
+    const markReady = () => {
+      if (orderReady && clientReady) {
+        setReady(true);
+      }
+    };
+
+    const handleSyncError = (error: unknown) => {
+      const snapshot = readLocal();
+      setOrders(snapshot.orders);
+      setClients(snapshot.clients);
+      setSyncError(error instanceof Error ? error.message : "Firestore sync failed");
       setReady(true);
-    });
+    };
+
+    const unsubOrders = onSnapshot(
+      ordersQuery,
+      (snapshot) => {
+        setOrders(snapshot.docs.map((item) => ({ ...(item.data() as Omit<OrderRecord, "id">), id: item.id })));
+        orderReady = true;
+        setSyncError(null);
+        markReady();
+      },
+      handleSyncError
+    );
+
+    const unsubClients = onSnapshot(
+      clientsQuery,
+      (snapshot) => {
+        setClients(snapshot.docs.map((item) => ({ ...(item.data() as Omit<ClientRecord, "id">), id: item.id })));
+        clientReady = true;
+        setSyncError(null);
+        markReady();
+      },
+      handleSyncError
+    );
 
     return () => {
       unsubOrders();
       unsubClients();
     };
-  }, [cloudEnabled]);
+  }, [cloudEnabled, uid]);
 
   useEffect(() => {
-    if (!cloudEnabled && ready) {
+    if (useLocalMode && ready) {
       writeLocal({ orders, clients });
     }
-  }, [orders, clients, cloudEnabled, ready]);
+  }, [orders, clients, ready, useLocalMode]);
 
   async function addOrders(newOrders: OrderRecord[]) {
-    if (!cloudEnabled) {
+    if (useLocalMode) {
       setOrders((prev) => [...newOrders, ...prev]);
       setClients((prev) => {
         const next = [...prev];
@@ -100,18 +191,17 @@ export function useCRMData() {
     }
 
     const db = getDb();
-    if (!db) return;
+    if (!db || !uid) return;
     const batch = writeBatch(db);
     const existingClients = new Map(clients.map((client) => [client.phone, client]));
 
     newOrders.forEach((order) => {
-      const orderRef = doc(collection(db, "orders"));
-      batch.set(orderRef, order);
+      batch.set(doc(db, ...getUserCollectionPath(uid, "orders"), order.id), order);
 
       const existingClient = existingClients.get(order.phone);
       if (existingClient) {
         batch.set(
-          doc(db, "clients", existingClient.id),
+          doc(db, ...getUserCollectionPath(uid, "clients"), existingClient.id),
           {
             ...existingClient,
             name: order.name || existingClient.name,
@@ -121,7 +211,9 @@ export function useCRMData() {
           { merge: true }
         );
       } else {
-        batch.set(doc(collection(db, "clients")), {
+        const clientId = createId();
+        batch.set(doc(db, ...getUserCollectionPath(uid, "clients"), clientId), {
+          id: clientId,
           name: order.name,
           phone: order.phone,
           addr: order.addr,
@@ -135,67 +227,70 @@ export function useCRMData() {
   }
 
   async function saveOrder(order: OrderRecord) {
-    if (!cloudEnabled) {
+    if (useLocalMode) {
       setOrders((prev) => prev.map((item) => (item.id === order.id ? order : item)));
       return;
     }
     const db = getDb();
-    if (!db) return;
-    await setDoc(doc(db, "orders", order.id), order, { merge: true });
+    if (!db || !uid) return;
+    await setDoc(doc(db, ...getUserCollectionPath(uid, "orders"), order.id), order, { merge: true });
   }
 
   async function removeOrder(orderId: string) {
-    if (!cloudEnabled) {
+    if (useLocalMode) {
       setOrders((prev) => prev.filter((item) => item.id !== orderId));
       return;
     }
     const db = getDb();
-    if (!db) return;
-    await deleteDoc(doc(db, "orders", orderId));
+    if (!db || !uid) return;
+    await deleteDoc(doc(db, ...getUserCollectionPath(uid, "orders"), orderId));
   }
 
   async function saveClient(client: ClientRecord) {
-    if (!cloudEnabled) {
+    if (useLocalMode) {
       setClients((prev) => prev.map((item) => (item.id === client.id ? client : item)));
       return;
     }
     const db = getDb();
-    if (!db) return;
-    await setDoc(doc(db, "clients", client.id), client, { merge: true });
+    if (!db || !uid) return;
+    await setDoc(doc(db, ...getUserCollectionPath(uid, "clients"), client.id), client, { merge: true });
   }
 
   async function removeClient(clientId: string) {
-    if (!cloudEnabled) {
+    if (useLocalMode) {
       setClients((prev) => prev.filter((item) => item.id !== clientId));
       return;
     }
     const db = getDb();
-    if (!db) return;
-    await deleteDoc(doc(db, "clients", clientId));
+    if (!db || !uid) return;
+    await deleteDoc(doc(db, ...getUserCollectionPath(uid, "clients"), clientId));
   }
 
   async function importSnapshot(snapshot: AppSnapshot) {
-    if (!cloudEnabled) {
+    if (useLocalMode) {
       setOrders(snapshot.orders);
       setClients(snapshot.clients);
       return;
     }
 
     const db = getDb();
-    if (!db) return;
+    if (!db || !uid) return;
     const batch = writeBatch(db);
 
-    const existingOrders = await getDocs(collection(db, "orders"));
-    existingOrders.docs.forEach((entry) => batch.delete(doc(db, "orders", entry.id)));
-    const existingClients = await getDocs(collection(db, "clients"));
-    existingClients.docs.forEach((entry) => batch.delete(doc(db, "clients", entry.id)));
+    const userOrdersRef = collection(db, ...getUserCollectionPath(uid, "orders"));
+    const userClientsRef = collection(db, ...getUserCollectionPath(uid, "clients"));
+
+    const existingOrders = await getDocs(userOrdersRef);
+    existingOrders.docs.forEach((entry) => batch.delete(doc(db, ...getUserCollectionPath(uid, "orders"), entry.id)));
+    const existingClients = await getDocs(userClientsRef);
+    existingClients.docs.forEach((entry) => batch.delete(doc(db, ...getUserCollectionPath(uid, "clients"), entry.id)));
 
     snapshot.orders.forEach((order) => {
-      batch.set(doc(db, "orders", order.id), order);
+      batch.set(doc(db, ...getUserCollectionPath(uid, "orders"), order.id), order);
     });
 
     snapshot.clients.forEach((client) => {
-      batch.set(doc(db, "clients", client.id), client);
+      batch.set(doc(db, ...getUserCollectionPath(uid, "clients"), client.id), client);
     });
 
     await batch.commit();
@@ -205,7 +300,9 @@ export function useCRMData() {
     orders,
     clients,
     ready,
+    syncError,
     cloudEnabled,
+    useLocalMode,
     addOrders,
     saveOrder,
     removeOrder,
